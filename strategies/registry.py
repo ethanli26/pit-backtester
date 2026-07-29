@@ -35,3 +35,31 @@ def names() -> list[str]:
 def all_strategies() -> dict[str, type]:
     """Return a copy of the registry mapping name -> class."""
     return dict(_REGISTRY)
+
+
+# --- Portfolio strategies -----------------------------------------------------
+# Cross-sectional, monthly, leverage-overlay strategies (e.g. vol-managed momentum)
+# are a DIFFERENT paradigm from the per-name daily breakout engine above, so they
+# live in their own registry. Keeping them separate means the engine-driven library
+# scorecard never tries to run a portfolio strategy through the per-name engine.
+
+_PORTFOLIO_REGISTRY: dict[str, type] = {}
+
+
+def register_portfolio(strategy_cls: type) -> type:
+    """Class decorator: register a portfolio Strategy subclass under its ``name``."""
+    name = getattr(strategy_cls, "name", None)
+    if not name:
+        raise ValueError(f"{strategy_cls.__name__} must define a non-empty 'name'.")
+    _PORTFOLIO_REGISTRY[name] = strategy_cls
+    return strategy_cls
+
+
+def get_portfolio(name: str) -> type:
+    """Return the registered portfolio strategy class for ``name``."""
+    return _PORTFOLIO_REGISTRY[name]
+
+
+def portfolio_strategies() -> dict[str, type]:
+    """Return a copy of the portfolio-strategy registry mapping name -> class."""
+    return dict(_PORTFOLIO_REGISTRY)

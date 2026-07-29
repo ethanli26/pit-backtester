@@ -61,6 +61,7 @@ def predict_score(model, scaler, frame: pd.DataFrame) -> np.ndarray:
     return model.predict(scaler.transform(frame[CURATED_FACTORS].to_numpy(dtype=float)))
 
 
+#is the sector doing well
 def cross_sectional_ic(frame: pd.DataFrame, score_col: str, ret_col: str = "fwd_return") -> dict:
     """Per-date Spearman IC of a score vs forward return; mean/std/IR/t-stat."""
     ics = []

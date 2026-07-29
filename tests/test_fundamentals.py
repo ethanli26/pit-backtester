@@ -12,6 +12,8 @@ import pytest
 
 import factors  # noqa: F401  (registers factors, incl. fundamentals)
 from data.sharadar_provider import (
+    API_KEY_ENV,
+    SharadarCacheMiss,
     SharadarProvider,
     SharadarUnavailable,
     _as_of_daily,
@@ -23,10 +25,12 @@ from data.sharadar_provider import (
 from factors.base import FactorData, all_factors
 
 
-# ---- provider stub mode -------------------------------------------------------
+# ---- provider stub / cache-only guards ----------------------------------------
 
-def test_provider_constructs_without_key_but_real_calls_raise():
-    provider = SharadarProvider(api_key=None)
+def test_provider_stub_mode_raises_on_real_calls(monkeypatch, tmp_path):
+    """With no key and an empty cache, every real call raises descriptively."""
+    monkeypatch.delenv(API_KEY_ENV, raising=False)  # force stub regardless of ambient .env
+    provider = SharadarProvider(api_key=None, cache_dir=tmp_path)
     assert provider.stub is True
     with pytest.raises(SharadarUnavailable, match="NASDAQ_DATA_LINK_API_KEY"):
         provider.get_price_bars(["AAPL"])
@@ -34,6 +38,30 @@ def test_provider_constructs_without_key_but_real_calls_raise():
         provider.get_fundamentals(["AAPL"])
     with pytest.raises(SharadarUnavailable):
         provider.get_universe()
+
+
+def test_cache_only_mode_never_hits_api(tmp_path):
+    """Cache-only mode never fetches: missing per-symbol data is skipped (no API), and a
+    required archive (the universe master) raises rather than silently calling out."""
+    provider = SharadarProvider(api_key="dummy-key", cache_dir=tmp_path, cache_only=True)
+    # A name absent from the archive is skipped, not fetched -> empty result, zero API calls.
+    assert provider.get_price_bars(["AAPL"]) == {}
+    assert provider.get_fundamentals(["AAPL"]) == {}
+    # The universe master is a required archive; with none present, refuse (no silent API).
+    with pytest.raises(SharadarCacheMiss):
+        provider.get_universe()
+
+
+def test_cache_only_serves_archived_parquet_without_api(tmp_path):
+    """A pre-archived per-symbol parquet is served offline with no API call."""
+    sep = tmp_path / "sep"
+    sep.mkdir()
+    frame = pd.DataFrame({"Open": [1.0], "High": [1.0], "Low": [1.0], "Close": [1.0],
+                          "Volume": [100.0]}, index=pd.DatetimeIndex(["2020-01-02"], name="Date"))
+    frame.to_parquet(sep / "AAPL.parquet")
+    provider = SharadarProvider(api_key=None, cache_dir=tmp_path, cache_only=True)
+    out = provider.get_price_bars(["AAPL"])
+    assert "AAPL" in out and len(out["AAPL"]) == 1
 
 
 # ---- filing-date indexing -----------------------------------------------------
@@ -129,24 +157,49 @@ def test_fundamental_factor_requires_pit_data():
 
 # ---- look-ahead safety (end to end through the panel builder) -----------------
 
-def _synthetic_filings(seed: int = 0) -> dict[str, pd.DataFrame]:
+ALL_FUNDAMENTAL = [
+    "profitability", "operating_profitability", "gross_margin", "earnings_yield",
+    "fcf_yield", "book_to_price", "sales_growth", "earnings_growth", "accruals",
+    "asset_growth", "debt_to_equity", "quality_composite",
+]
+
+
+def _synthetic_filings(seed: int = 0, n_symbols: int = 12) -> dict[str, pd.DataFrame]:
+    """Filing-dated frames carrying every raw field the full library needs."""
     rng = np.random.default_rng(seed)
     datekeys = pd.to_datetime(["2019-02-20", "2019-05-15", "2019-08-14", "2019-11-13",
                                "2020-02-19", "2020-05-13", "2020-08-12", "2020-11-10"])
     out = {}
-    for sym in ["A", "B", "C"]:
-        out[sym] = pd.DataFrame({
+    for i in range(n_symbols):
+        out[f"S{i:02d}"] = pd.DataFrame({
             "gross_profit": rng.uniform(5, 50, len(datekeys)),
             "total_assets": rng.uniform(100, 500, len(datekeys)),
             "net_income": rng.uniform(-10, 40, len(datekeys)),
             "book_equity": rng.uniform(20, 200, len(datekeys)),
             "shares": rng.uniform(5, 50, len(datekeys)),
+            "operating_income": rng.uniform(-5, 45, len(datekeys)),
+            "revenue": rng.uniform(80, 600, len(datekeys)),
+            "free_cash_flow": rng.uniform(-20, 50, len(datekeys)),
+            "op_cash_flow": rng.uniform(-10, 60, len(datekeys)),
+            "total_debt": rng.uniform(0, 300, len(datekeys)),
         }, index=pd.DatetimeIndex(datekeys, name="datekey"))
     return out
 
 
+def test_accruals_arithmetic_and_sign():
+    idx = pd.date_range("2021-01-01", periods=1, freq="D")
+    close = pd.DataFrame({"A": [10.0]}, index=idx)
+    f = {
+        "net_income_ttm": pd.DataFrame({"A": 40.0}, index=idx),
+        "op_cash_flow_ttm": pd.DataFrame({"A": 10.0}, index=idx),  # earnings >> cash => high accruals
+        "total_assets": pd.DataFrame({"A": 100.0}, index=idx),
+    }
+    accr = all_factors()["accruals"]().compute(_factor_data_with(f, close))
+    assert accr.loc[idx[0], "A"] == pytest.approx((40.0 - 10.0) / 100.0)  # 0.30
+
+
 def test_fundamental_factors_are_look_ahead_safe():
-    """A fundamental factor's value at t must not change when future bars are dropped."""
+    """Every fundamental factor's value at t is unchanged when future bars are dropped."""
     master = pd.date_range("2019-01-01", "2020-12-31", freq="B")
     filings = _synthetic_filings()
     panels = build_fundamental_panels(filings, master)
@@ -154,12 +207,10 @@ def test_fundamental_factors_are_look_ahead_safe():
     data = _factor_data_with(panels, close)
 
     cutoff = master.get_loc(pd.Timestamp("2020-06-15"))
-    trunc_master = master[: cutoff + 1]
-    trunc_panels = build_fundamental_panels(filings, trunc_master)
-    trunc_close = close.iloc[: cutoff + 1]
-    trunc_data = _factor_data_with(trunc_panels, trunc_close)
+    trunc_panels = build_fundamental_panels(filings, master[: cutoff + 1])
+    trunc_data = _factor_data_with(trunc_panels, close.iloc[: cutoff + 1])
 
-    for name in ["profitability", "earnings_yield", "book_to_price", "earnings_growth"]:
+    for name in ALL_FUNDAMENTAL:
         factor = all_factors()[name]()
         full = factor.compute(data).iloc[cutoff]
         trunc = factor.compute(trunc_data).iloc[cutoff]

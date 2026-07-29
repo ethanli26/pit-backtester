@@ -24,7 +24,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import pandas as pd  # noqa: E402
 
 import factors  # noqa: E402,F401  (registers built-ins on import)
-from backtest.universe import BENCHMARK, constituents, load_bars, load_sharadar_broad  # noqa: E402
+from backtest.universe import (  # noqa: E402
+    BENCHMARK,
+    constituents,
+    load_bars,
+    load_sharadar_broad,
+    select_liquid_sharadar_universe,
+)
 from config import LIQUIDITY_LOOKBACK, MIN_DOLLAR_VOLUME, MIN_PRICE  # noqa: E402
 from data.sharadar_provider import SharadarUnavailable, build_fundamental_panels  # noqa: E402
 from factors.base import FactorData, all_factors  # noqa: E402
@@ -41,12 +47,20 @@ EXPECTED_SIGN = {
     "momentum_12_1": +1, "momentum_6_1": +1, "short_term_reversal": +1,
     "low_volatility": +1, "ivol_capm": -1, "beta_low": +1, "max_daily_return": -1,
     "return_skewness": -1, "ncskew": -1, "duvol": -1,
-    # US-effective fundamental family (all higher = better/cheaper/faster => higher returns).
-    "profitability": +1, "earnings_yield": +1, "book_to_price": +1, "earnings_growth": +1,
+    # US-effective fundamental library. Quality/value/growth priors are POSITIVE;
+    # accruals, asset growth, and leverage have NEGATIVE priors (encoded naturally).
+    "profitability": +1, "operating_profitability": +1, "gross_margin": +1,
+    "earnings_yield": +1, "fcf_yield": +1, "book_to_price": +1,
+    "sales_growth": +1, "earnings_growth": +1, "quality_composite": +1,
+    "accruals": -1, "asset_growth": -1, "debt_to_equity": -1,
 }
 RISK_CLUSTER = ["ivol_capm", "beta_low", "low_volatility", "max_daily_return"]
-# The fundamental family this run exists to test.
-FUNDAMENTAL_FACTORS = ["profitability", "earnings_yield", "book_to_price", "earnings_growth"]
+# The fundamental library this run exists to test (point-in-time, survivorship-free).
+FUNDAMENTAL_FACTORS = [
+    "profitability", "operating_profitability", "gross_margin", "earnings_yield",
+    "fcf_yield", "book_to_price", "sales_growth", "earnings_growth", "accruals",
+    "asset_growth", "debt_to_equity", "quality_composite",
+]
 
 
 def configure_logging() -> None:
@@ -179,14 +193,24 @@ def print_risk_cluster(large: dict, broad: dict) -> tuple[int, int]:
     return corrected, moved
 
 
-def build_sharadar_factor_data() -> tuple[FactorData, pd.DataFrame]:
-    """Assemble point-in-time, survivorship-free FactorData from Sharadar.
+SHARADAR_MAX_SYMBOLS = 1500   # cap the most-liquid survivorship-free sample (bounds panel size)
 
-    Returns ``(FactorData, eligible_mask)``. Price panels span delisted + live names;
-    ``fundamentals`` are filing-dated daily panels (see build_fundamental_panels). Raises
-    ``SharadarUnavailable`` in stub mode.
+
+def build_sharadar_factor_data(cache_only: bool = True) -> tuple[FactorData, pd.DataFrame]:
+    """Assemble point-in-time, survivorship-free FactorData from the local Sharadar archive.
+
+    Defaults to ``cache_only`` so the run reads ONLY local parquet (zero API calls),
+    proving the archive is self-sufficient. Selects the most-liquid US common stocks
+    (delisted included), builds price panels + filing-dated fundamental panels. Returns
+    ``(FactorData, eligible_mask)``. Raises ``SharadarUnavailable``/``SharadarCacheMiss``
+    if the archive is missing.
     """
-    bars, filings, benchmark_close = load_sharadar_broad()
+    from data.sharadar_provider import SharadarProvider
+
+    provider = SharadarProvider(cache_only=cache_only)
+    tickers = select_liquid_sharadar_universe(provider, max_symbols=SHARADAR_MAX_SYMBOLS)
+    log.info("Selected %d liquid survivorship-free common stocks.", len(tickers))
+    bars, filings, benchmark_close = load_sharadar_broad(provider=provider, tickers=tickers)
     symbols = sorted(bars)
     master = benchmark_close.index if benchmark_close is not None else bars[symbols[0]].index
 
@@ -201,17 +225,46 @@ def build_sharadar_factor_data() -> tuple[FactorData, pd.DataFrame]:
     return data, liquidity_mask(data)
 
 
-def evaluate_fundamentals(data: FactorData, eligible: pd.DataFrame) -> dict:
-    """Score the point-in-time fundamental factors on the Sharadar universe."""
+def assert_filing_date_safety(data: FactorData, factor_name: str = "profitability") -> None:
+    """Assert a fundamental factor is filing-date safe on this real data.
+
+    Recomputes the factor on data TRUNCATED after a cutoff date; the value at the cutoff
+    must be identical (dropping future bars cannot change a point-in-time value). Raises
+    AssertionError on any leak.
+    """
+    factor = all_factors()[factor_name]()
+    idx = data.close.index
+    cutoff = idx[int(len(idx) * 0.6)]
+    full = factor.compute(data).loc[cutoff]
+
+    def _slice(panel):
+        return panel.loc[:cutoff] if panel is not None else None
+
+    truncated = FactorData(
+        open=_slice(data.open), high=_slice(data.high), low=_slice(data.low),
+        close=_slice(data.close), volume=_slice(data.volume),
+        market=_slice(data.market),
+        fundamentals={k: _slice(v) for k, v in data.fundamentals.items()})
+    trunc = factor.compute(truncated).loc[cutoff]
+    diff = (full - trunc).abs().max()
+    assert pd.isna(diff) or diff < 1e-9, f"FILING-DATE LEAK in {factor_name}"
+    log.info("Filing-date look-ahead guard verified on %s at %s.", factor_name, cutoff.date())
+
+
+def evaluate_all(data: FactorData, eligible: pd.DataFrame) -> dict:
+    """Score EVERY registered factor (price + fundamental) on the Sharadar universe."""
     scores: dict[str, dict] = {}
-    for name in FUNDAMENTAL_FACTORS:
-        factor = all_factors()[name]()
-        scores[name] = evaluate_factor(factor, data, eligible=eligible)
+    for name, cls in all_factors().items():
+        scores[name] = evaluate_factor(cls(), data, eligible=eligible)
     return scores
 
 
-def print_fundamental_scorecard(scores: dict) -> list[str]:
-    """Print the fundamental scorecard sorted by |t|, with sign-vs-prior; return BUILDs."""
+def _passes_bar(s: dict) -> bool:
+    return _verdict(s) == "BUILD"
+
+
+def print_full_scorecard(scores: dict) -> list[dict]:
+    """Print the combined price+fundamental scorecard sorted by |t|. Return ordered rows."""
     ordered = sorted(scores.values(),
                      key=lambda s: abs(s["t_stat"]) if s["t_stat"] is not None else -1.0, reverse=True)
     rows = []
@@ -219,54 +272,101 @@ def print_fundamental_scorecard(scores: dict) -> list[str]:
         exp = EXPECTED_SIGN.get(s["name"])
         sign_ok = exp is not None and _sign(s["mean_ic"]) == exp
         rows.append({
-            "factor": s["name"], "periods": s["n_periods"],
+            "factor": s["name"], "cat": s["category"][:4], "periods": s["n_periods"],
             "mean_IC": _fmt_ic(s["mean_ic"]), "IR": _fmt_num(s["ir"]), "t_stat": _fmt_num(s["t_stat"]),
             "decile_spread": _fmt_pct(s["top_minus_bottom"]), "TMB_Sharpe": _fmt_num(s["tmb_sharpe"]),
-            "sign_ok": "yes" if sign_ok else "no", "verdict": _verdict(s),
+            "exp_sign": ("+" if exp > 0 else "-") if exp is not None else "?",
+            "sign_ok": "yes" if sign_ok else ("no" if exp is not None else "—"),
+            "verdict": _verdict(s),
         })
-    print("\n=== FUNDAMENTAL factor scorecard — point-in-time, survivorship-free "
+    print("\n=== FULL factor scorecard — point-in-time, survivorship-free Sharadar universe "
           "(monthly; |IC|>0.02 & |t|>2 => BUILD; sorted by |t|) ===")
     print(pd.DataFrame(rows).to_string(index=False))
-    return [s["name"] for s in ordered if _verdict(s) == "BUILD"]
+    return ordered
+
+
+def print_multiple_testing_note(n_tested: int, n_pass: int) -> None:
+    """State how many bar-passers to expect by chance alone (two-sided t>2)."""
+    expected_false = n_tested * 0.0455   # P(|t|>2) ~ 4.55% under the null
+    print("\n=== Multiple-testing reality check ===")
+    print(f"  - {n_tested} factors tested at |t|>2; under the null ~1 in 22 (4.55%) passes by "
+          f"chance, so ~{expected_false:.1f} false positives are EXPECTED even if nothing works.")
+    print(f"  - {n_pass} factors actually cleared the bar. A correct economic SIGN is the extra "
+          f"filter that separates a real effect from a lucky draw, so the shortlist below "
+          f"requires BOTH significance AND the literature-expected sign.")
+
+
+def print_shortlist(ordered: list[dict]) -> None:
+    """Print the correctly-signed shortlist and flag any wrong-signed passers."""
+    correct, wrong = [], []
+    for s in ordered:
+        if not _passes_bar(s):
+            continue
+        exp = EXPECTED_SIGN.get(s["name"])
+        if exp is not None and _sign(s["mean_ic"]) == exp:
+            correct.append(s)
+        else:
+            wrong.append(s)
+    print("\n=== SHORTLIST: passes the bar WITH the correct economic sign ===")
+    if correct:
+        for s in correct:
+            print(f"  + {s['name']:<24} IC={_fmt_ic(s['mean_ic'])}  t={_fmt_num(s['t_stat'])}  "
+                  f"IR={_fmt_num(s['ir'])}  decile_spread={_fmt_pct(s['top_minus_bottom'])}  "
+                  f"Sharpe={_fmt_num(s['tmb_sharpe'])}")
+    else:
+        print("  (none)")
+    if wrong:
+        print("\n  WRONG-SIGNED passers (significant but opposite the prior => likely artifact, "
+              "NOT a tradeable signal):")
+        for s in wrong:
+            exp = EXPECTED_SIGN.get(s["name"])
+            prior = ("+" if exp > 0 else "-") if exp is not None else "?"
+            print(f"  ! {s['name']:<24} IC={_fmt_ic(s['mean_ic'])}  t={_fmt_num(s['t_stat'])}  "
+                  f"(prior {prior})")
 
 
 def run_fundamental_section(price_builds: list[str]) -> None:
-    """Run the fundamental family on Sharadar, or report stub mode clearly."""
+    """Run ALL factors on the PIT survivorship-free Sharadar universe, or report stub mode."""
     print("\n" + "=" * 78)
-    print("US-EFFECTIVE FUNDAMENTAL FAMILY  (the test this whole layer was built for)")
+    print("FUNDAMENTAL LIBRARY ON POINT-IN-TIME, SURVIVORSHIP-FREE DATA "
+          "(the test this layer was built for)")
     print("=" * 78)
     try:
         data, eligible = build_sharadar_factor_data()
     except SharadarUnavailable as error:
-        print("STUB MODE — fundamental factors NOT run (no Sharadar API key).")
+        print("DATA UNAVAILABLE — fundamental factors NOT run.")
         print(f"  Reason: {error}")
-        print("  The plumbing is fully built and verified: provider, point-in-time filing-date")
-        print("  panels, the four factors (profitability, earnings_yield, book_to_price,")
-        print("  earnings_growth), the survivorship-free 'sharadar_broad' universe, and this")
-        print("  harness path all run end to end on synthetic fundamentals in the test suite.")
-        print(f"  To produce REAL numbers, set NASDAQ_DATA_LINK_API_KEY and re-run; only the")
-        print("  final result is gated on the spend, not the code.")
+        print("  The plumbing is fully built and verified end to end in the test suite "
+              "(provider, filing-date panels, the 12-factor library, the survivorship-free")
+        print("  universe, and this harness). Archive the data, then re-run for real numbers.")
         print(f"  For reference, the PRICE family on the free large-cap universe cleared the bar "
               f"with: {', '.join(price_builds) if price_builds else 'NOTHING'}.")
         return
 
-    builds = print_fundamental_scorecard(evaluate_fundamentals(data, eligible))
-    print(f"\nFundamental factors clearing the bar: {', '.join(builds) if builds else 'NONE'}.")
+    # LOOK-AHEAD GUARD: prove filing-date safety on the real data before trusting any IC.
+    assert_filing_date_safety(data)
+    scores = evaluate_all(data, eligible)
+    ordered = print_full_scorecard(scores)
+    n_pass = sum(1 for s in ordered if _passes_bar(s))
+    print_multiple_testing_note(len(ordered), n_pass)
+    print_shortlist(ordered)
+
+    fund_pass = [s["name"] for s in ordered
+                 if _passes_bar(s) and s["name"] in FUNDAMENTAL_FACTORS
+                 and _sign(s["mean_ic"]) == EXPECTED_SIGN.get(s["name"])]
     print("\n=== Honest note: fundamentals (PIT, survivorship-free) vs price (free, survivors) ===")
-    print("  - This is the FIRST run of the fundamental family on point-in-time, "
-          "survivorship-free data — the data the US-vs-China study says these factors need.")
+    print("  - First run of the fundamental library on point-in-time, survivorship-free data.")
     print(f"  - Price family on the OLD free large-cap universe cleared the bar with: "
           f"{', '.join(price_builds) if price_builds else 'NOTHING'}.")
-    if builds:
-        print(f"  - VERDICT: the US-effective fundamental family DOES clear the bar here "
-              f"({', '.join(builds)}) where the price family largely did not — consistent with "
-              f"the study's claim that fundamentals, not price/reversal, drive US returns.")
+    if fund_pass:
+        print(f"  - VERDICT: the US-effective fundamental family DOES clear the bar with the right "
+              f"sign here ({', '.join(fund_pass)}), where the price family largely did not — "
+              f"consistent with the study's claim that fundamentals drive US returns.")
     else:
-        print("  - VERDICT: even on point-in-time, survivorship-free data the fundamental family "
-              "did NOT clear the bar on this window — a genuinely negative result, not a data "
-              "artifact, since survivorship and look-ahead were removed.")
+        print("  - VERDICT: on this window/universe no fundamental factor cleared the bar with the "
+              "correct sign — a genuine (not survivorship/look-ahead) negative result.")
     print("  - The bar (|IC|>0.02 & |t|>2) was NOT lowered; IC is close-to-close predictive "
-          "power, not tradable P&L.")
+          "power, not tradable P&L; the sign check guards against multiple-testing flukes.")
 
 
 def main() -> int:

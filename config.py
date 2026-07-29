@@ -30,8 +30,13 @@ IB_PORT = int(os.getenv("IB_PORT", "7497"))          # 7497 = paper port (keep o
 IB_CLIENT_ID = int(os.getenv("IB_CLIENT_ID", "1"))   # API client id
 
 # --- Agent behavior ---
-# Autonomy gate mode: signal_only | approve | semi_auto | full_auto. Start safe.
-AUTONOMY_MODE = os.getenv("AUTONOMY_MODE", "approve")
+# Autonomy gate mode (decision/autonomy.py):
+#   signal_only   — alert only, place nothing
+#   approve       — confirm EACH order y/N (fine for a few-name strategy)
+#   approve_batch — review the whole book, ONE confirmation for all orders (portfolio
+#                   strategies); unusually large orders still get an individual y/N
+#   semi_auto / full_auto — not implemented yet
+AUTONOMY_MODE = os.getenv("AUTONOMY_MODE", "approve_batch")
 
 # Fraction of account equity risked per trade (1% default).
 RISK_PER_TRADE = float(os.getenv("RISK_PER_TRADE", "0.01"))
@@ -115,9 +120,36 @@ SLIPPAGE_BPS_SMALL = float(os.getenv("SLIPPAGE_BPS_SMALL", "40"))
 OVERLAY_ENABLED = _env_bool("OVERLAY_ENABLED", False)
 OVERLAY_INSTRUMENT = os.getenv("OVERLAY_INSTRUMENT", "SPY")
 
+# --- Vol-managed momentum strategy (the validated, walk-forward-tested portfolio) ---
+# 12-1 momentum (skip the last month) ranked cross-sectionally on the survivorship-free
+# liquid universe, formed monthly as a top/bottom-decile portfolio, then scaled to a
+# target volatility (Barroso & Santa-Clara 2015) to tame the momentum crash. All values
+# are research defaults; none were tuned to the result (vol target is set from the TRAIN
+# window only, never the test window).
+VMM_VOL_WINDOW = int(os.getenv("VMM_VOL_WINDOW", "12"))            # trailing months for realized vol
+VMM_LEVERAGE_CAP = float(os.getenv("VMM_LEVERAGE_CAP", "2.0"))     # max gross leverage from vol scaling
+VMM_DECILES = int(os.getenv("VMM_DECILES", "10"))                 # sort into this many buckets
+VMM_COST_BPS_PER_SIDE = float(os.getenv("VMM_COST_BPS_PER_SIDE", "15"))  # per-side cost on actual turnover
+VMM_STOP_PCT = float(os.getenv("VMM_STOP_PCT", "0.20"))           # stop width for size_position translation
+VMM_LONG_ONLY = _env_bool("VMM_LONG_ONLY", False)                 # paper accounts that can't short set this True
+
 # --- Execution safety ---
 # When True, the decision runner prints proposals but places no orders.
-DRY_RUN = _env_bool("DRY_RUN", True)
+DRY_RUN = _env_bool("DRY_RUN", False)
+
+# Orders are placed as LIMIT orders priced off the reference price (a limit carries a
+# price, so IBKR does not block it for lacking a live market-data subscription — the
+# Error 354 case — and it gives price protection on volatile momentum names). The limit
+# sits this fraction beyond the reference so the order is marketable but protected:
+# BUY at ref*(1+buffer), SELL at ref*(1-buffer). 0.5% default.
+LIMIT_BUFFER = float(os.getenv("LIMIT_BUFFER", "0.005"))
+
+# Batch approval (AUTONOMY_MODE="approve_batch"): one confirmation for the whole book,
+# EXCEPT unusually large orders, which STILL get an individual y/N. An order is "large"
+# if its value exceeds this multiple of the average order value, or an absolute $ cap
+# (BATCH_MAX_ORDER_VALUE=0 disables the absolute cap).
+BATCH_OUTLIER_MULT = float(os.getenv("BATCH_OUTLIER_MULT", "2.0"))
+BATCH_MAX_ORDER_VALUE = float(os.getenv("BATCH_MAX_ORDER_VALUE", "0"))
 
 # --- Capstone research surface (read by main.py) ---
 # Universe for `research` / `backtest`: large | mid | small | broad. Default "large"

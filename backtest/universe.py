@@ -191,10 +191,48 @@ def load_bars(name: str, years: int = HISTORY_YEARS, refresh: bool = False) -> t
 
 SHARADAR_BROAD = "sharadar_broad"
 SHARADAR_MIN_DOLLAR_VOLUME = 5_000_000.0  # liquidity floor, same spirit as the free filter
+SHARADAR_BENCHMARK = "SPY"
+# Categories treated as US common equity (the factor study's universe). Delisted names
+# in these categories are KEPT — that is what makes the universe survivorship-free.
+COMMON_STOCK_CATEGORIES = {
+    "Domestic Common Stock", "Domestic Common Stock Primary Class",
+    "Domestic Common Stock Secondary Class", "ADR Common Stock",
+    "ADR Common Stock Primary Class",
+}
+
+
+def select_liquid_sharadar_universe(provider, max_symbols: int = 1500,
+                                    min_dollar_volume: float = SHARADAR_MIN_DOLLAR_VOLUME) -> list[str]:
+    """Pick the most-liquid US common stocks (survivorship-free) from the local archive.
+
+    Reads the bulk SEP parquet ONCE to compute each ticker's median daily dollar volume
+    and history length, restricts to common-stock categories (delisted INCLUDED), keeps
+    names clearing the liquidity/history floors, and returns the top ``max_symbols`` by
+    median dollar volume. Selecting by a full-history liquidity summary (not by survival)
+    keeps the sample survivorship-free while bounding panel size.
+    """
+    import pandas as _pd
+
+    tickers_frame = provider.get_universe()
+    common = set(tickers_frame.loc[
+        tickers_frame["category"].isin(COMMON_STOCK_CATEGORIES), "ticker"])
+
+    sep_path = provider.bulk_dir / "SEP.parquet"
+    if not sep_path.exists():
+        raise FileNotFoundError(
+            f"{sep_path} not found; run the SEP bulk archive before selecting the universe.")
+    # Only the columns needed for a liquidity summary (keeps memory modest).
+    sep = _pd.read_parquet(sep_path, columns=["ticker", "closeadj", "volume"])
+    sep = sep[sep["ticker"].isin(common)]
+    sep["dollar_volume"] = sep["closeadj"] * sep["volume"]
+    grouped = sep.groupby("ticker")["dollar_volume"].agg(["median", "count"])
+    liquid = grouped[(grouped["median"] >= min_dollar_volume) & (grouped["count"] >= MIN_HISTORY_BARS)]
+    ranked = liquid.sort_values("median", ascending=False)
+    return ranked.index[:max_symbols].tolist()
 
 
 def load_sharadar_broad(provider=None, min_dollar_volume: float = SHARADAR_MIN_DOLLAR_VOLUME,
-                        max_symbols: int | None = None):
+                        max_symbols: int | None = None, tickers: list[str] | None = None):
     """Load the survivorship-free US universe from Sharadar, INCLUDING delisted names.
 
     This is the real fix for survivorship bias. Unlike the hardcoded ``large/mid/small/
@@ -204,30 +242,44 @@ def load_sharadar_broad(provider=None, min_dollar_volume: float = SHARADAR_MIN_D
     bars up to its delisting and none after), regardless of whether it survives to today;
     the liquidity filter is still applied as-of each rebalance date in the harness.
 
-    Returns ``(bars, filings_by_symbol, benchmark_close)`` where ``filings_by_symbol`` is
-    each coin's filing-dated fundamentals frame (for the PIT panels). Raises
-    ``SharadarUnavailable`` in stub mode (no API key) — by design, so the spend gates
-    only the final numbers, not the plumbing.
+    ``tickers`` supplies an explicit symbol list (e.g. from
+    :func:`select_liquid_sharadar_universe`); otherwise it falls back to the raw TICKERS
+    order capped at ``max_symbols``. Returns ``(bars, filings_by_symbol, benchmark_close)``.
+    Raises ``SharadarUnavailable`` in stub mode (no API key).
     """
     from data.sharadar_provider import SF1_FIELDS, SharadarProvider
 
     provider = provider or SharadarProvider()
-    tickers_frame = provider.get_universe()  # includes delisted; raises in stub mode
-    tickers = tickers_frame["ticker"].tolist()
-    if max_symbols is not None:
-        tickers = tickers[:max_symbols]
+    if tickers is None:
+        tickers = provider.get_universe()["ticker"].tolist()  # includes delisted
+        if max_symbols is not None:
+            tickers = tickers[:max_symbols]
 
-    raw_bars = provider.get_price_bars(tickers + [BENCHMARK])
-    benchmark_close = raw_bars.get(BENCHMARK, pd.DataFrame()).get("Close")
+    raw_bars = provider.get_price_bars(list(tickers))
     bars: dict[str, pd.DataFrame] = {}
     for symbol, frame in raw_bars.items():
-        if symbol == BENCHMARK or frame is None or len(frame) < MIN_HISTORY_BARS:
+        if frame is None or len(frame) < MIN_HISTORY_BARS:
             continue
         # Liquidity floor on the FULL history (the harness re-checks as-of each date).
         if (frame["Close"] * frame["Volume"]).median() < min_dollar_volume:
             continue
         bars[symbol] = frame
+    # Sharadar SEP is equities-only (no ETFs), so there is no SPY to use as the market.
+    # Build an EQUAL-WEIGHTED index from the universe itself as the market proxy for the
+    # beta / idiosyncratic-vol factors — fully offline and survivorship-free by construction.
+    benchmark_close = equal_weight_index(bars)
     filings = provider.get_fundamentals(list(bars), SF1_FIELDS)
     log.info("Sharadar universe: %d tradable names (survivorship-free, delisted included).",
              len(bars))
     return bars, filings, benchmark_close
+
+
+def equal_weight_index(bars: dict[str, pd.DataFrame]) -> pd.Series:
+    """Equal-weighted daily-return price index across the universe (a market proxy).
+
+    LOOK-AHEAD GUARD: each day's level uses only that day's cross-sectional mean return,
+    so the series at t depends on no future data.
+    """
+    closes = pd.DataFrame({s: frame["Close"] for s, frame in bars.items()}).sort_index()
+    market_return = closes.pct_change(fill_method=None).mean(axis=1)  # equal-weight daily return
+    return (1.0 + market_return.fillna(0.0)).cumprod().rename("market")

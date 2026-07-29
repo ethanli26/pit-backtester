@@ -52,15 +52,23 @@ def _decile_spread(factor_row: pd.Series, forward: pd.Series) -> tuple[dict[int,
 
 
 def evaluate_factor(factor: Factor, data: FactorData, *, freq: str = "M",
-                    periods_per_year: int = 12, eligible: pd.DataFrame | None = None) -> dict:
+                    periods_per_year: int = 12, eligible: pd.DataFrame | None = None,
+                    start: pd.Timestamp | None = None, end: pd.Timestamp | None = None) -> dict:
     """Compute IC, IR, t-stat, and decile spread for one factor.
 
     Rebalances on the last trading day of each period; the holding period is until
     the next rebalance. ``eligible`` is an optional date x symbol boolean mask (e.g. a
     liquidity screen) that restricts the cross-section to tradeable names AS OF the
     rebalance date — computed look-ahead safe by the caller (uses data <= t).
+
+    ``start``/``end`` restrict only WHICH rebalance dates are scored (the holdout split),
+    NOT the data fed to ``compute`` — so trailing-window factors keep their full history
+    and stay look-ahead safe; we merely measure forward returns on the chosen segment.
     """
     values = factor.compute(data)        # date x symbol; value[t] uses data <= t
+    # A division by a near-zero fundamental can yield +/-inf; inf is never a valid factor
+    # value and would distort ranks/deciles, so treat it as missing.
+    values = values.replace([np.inf, -np.inf], np.nan)
     close = data.close
     rebal = _rebalance_dates(close.index, freq)
 
@@ -69,6 +77,10 @@ def evaluate_factor(factor: Factor, data: FactorData, *, freq: str = "M",
     decile_accumulator: dict[int, list[float]] = {d: [] for d in range(DECILES)}
 
     for current, nxt in zip(rebal[:-1], rebal[1:]):
+        if start is not None and current < start:
+            continue
+        if end is not None and current > end:
+            continue
         if current not in values.index or current not in close.index or nxt not in close.index:
             continue
         factor_row = values.loc[current]                      # factor as of t (<= t)

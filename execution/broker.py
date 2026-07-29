@@ -1,8 +1,9 @@
 """Interactive Brokers paper-trading connection built on ib_async.
 
 This wraps a single ``ib_async.IB`` session and exposes a small, readable API:
-connect, get_account_summary, place_market_order, and disconnect. All connection
-settings come from :mod:`config` (host, port, client id) and are never hardcoded.
+connect, get_account_summary, place_limit_order (the path used for paper orders),
+place_market_order, and disconnect. All connection settings come from :mod:`config`
+(host, port, client id) and are never hardcoded.
 
 ib_async is built on asyncio, but its synchronous methods (``connect``,
 ``accountSummary``, ``placeOrder``, ``disconnect``) run ib_async's own event loop
@@ -14,15 +15,42 @@ relies on.
 import logging
 import time
 
-from ib_async import IB, MarketOrder, Stock
+from ib_async import IB, LimitOrder, MarketOrder, Stock
 
 import config
 
 log = logging.getLogger(__name__)
 
-# Market orders are placed for US stocks routed through IB's SMART router in USD.
+# Orders are placed for US stocks routed through IB's SMART router in USD.
 ROUTING_EXCHANGE = "SMART"
 ORDER_CURRENCY = "USD"
+
+# Order statuses IBKR reports while an order is alive (not yet terminal).
+_WORKING_STATUSES = {"PendingSubmit", "ApiPending", "PreSubmitted", "Submitted"}
+
+
+def build_limit_order(action: str, qty: int, reference_price: float,
+                      buffer: float = config.LIMIT_BUFFER, tif: str = "DAY") -> tuple[LimitOrder, float]:
+    """Build a marketable-but-protected LIMIT order priced off a reference price.
+
+    BUY limit = ``ref * (1 + buffer)``; SELL limit = ``ref * (1 - buffer)`` (rounded to a
+    penny). ``tif`` is set EXPLICITLY on the order so a TWS preset cannot override it
+    (that override is the Error 10349 rejection). DAY is used by default: it is accepted
+    cleanly and a momentum rebalance should not rest overnight. Pure/offline — no network.
+    """
+    action = action.upper()
+    if action not in ("BUY", "SELL"):
+        raise ValueError(f"action must be 'BUY' or 'SELL', got {action!r}")
+    if qty <= 0:
+        raise ValueError(f"qty must be a positive integer, got {qty!r}")
+    if reference_price is None or reference_price <= 0:
+        raise ValueError(f"reference_price must be > 0 for a limit order, got {reference_price!r}")
+
+    sign = 1.0 if action == "BUY" else -1.0
+    limit_price = round(reference_price * (1.0 + sign * buffer), 2)
+    order = LimitOrder(action, qty, limit_price)
+    order.tif = tif   # explicit, so a TWS preset can't override it (avoids Error 10349)
+    return order, limit_price
 
 # Account summary tags we care about, mapped to the friendly keys we return.
 _SUMMARY_TAGS = {
@@ -209,3 +237,48 @@ class IBBroker:
         trade = self.ib.placeOrder(contract, order)
         log.info("Placed %s market order: %d %s", action, qty, symbol)
         return trade
+
+    def place_limit_order(self, symbol: str, qty: int, action: str, reference_price: float,
+                          buffer: float = config.LIMIT_BUFFER, tif: str = "DAY",
+                          status_wait: float = 1.5):
+        """Place a price-protected LIMIT order and log its ACTUAL status (not optimistic).
+
+        A limit order carries a price, so a paper account without a live market-data
+        subscription is not blocked from submitting it (the Error 354 case). After
+        submitting, we wait briefly and log the real order status — Filled / Working /
+        or Cancelled WITH the reason — so a rejection/cancel is visible immediately.
+        """
+        order, limit_price = build_limit_order(action, qty, reference_price, buffer, tif)
+        self.ensure_connected()
+
+        contract = Stock(symbol, ROUTING_EXCHANGE, ORDER_CURRENCY)
+        self.ib.qualifyContracts(contract)
+
+        trade = self.ib.placeOrder(contract, order)
+        log.info("Submitted %s LIMIT %d %s @ %.2f (ref %.2f, buffer %.2f%%, TIF %s).",
+                 order.action, qty, symbol, limit_price, reference_price, buffer * 100, tif)
+        self._log_order_status(trade, status_wait)
+        return trade
+
+    def _log_order_status(self, trade, status_wait: float) -> str:
+        """Wait briefly for IB to respond, then log the order's ACTUAL status + reason."""
+        try:
+            self.ib.sleep(status_wait)   # run ib_async's event loop so status/log update
+        except Exception as error:  # noqa: BLE001 - never let status polling raise
+            log.warning("Could not poll order status: %s", error)
+
+        status = trade.orderStatus.status
+        symbol = trade.contract.symbol
+        # The cancel/reject reason (e.g. 354, 10349) arrives as a trade-log message.
+        reason = trade.log[-1].message if getattr(trade, "log", None) else ""
+        if status == "Filled":
+            log.info("FILLED %s %d %s @ %.2f.", trade.order.action,
+                     trade.orderStatus.filled, symbol, trade.orderStatus.avgFillPrice)
+        elif status in _WORKING_STATUSES:
+            log.info("WORKING %s %d %s @ %.2f (status=%s; not yet filled).", trade.order.action,
+                     trade.order.totalQuantity, symbol, trade.order.lmtPrice, status)
+        else:  # Cancelled / ApiCancelled / Inactive — surface it, do not mask as "placed"
+            log.warning("NOT WORKING %s %d %s @ %.2f: status=%s%s", trade.order.action,
+                        trade.order.totalQuantity, symbol, trade.order.lmtPrice, status,
+                        f" — {reason}" if reason else "")
+        return status
