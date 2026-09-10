@@ -17,17 +17,17 @@ jobs:
           python-version: "3.11"
           cache: pip
 
-      - name: Install dependencies (offline test set)
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          # Only the deps the offline tests import — no broker/network/heavy libs,
-          # which keeps CI fast and reliable. (yfinance is import-only here.)
-          pip install pandas numpy python-dotenv yfinance
+          pip install -r requirements.txt
           pip install -r requirements-dev.txt
 
-      - name: Run offline test suite with coverage
-        # Skip slow + network-marked tests so CI is deterministic and offline.
+      - name: Run the offline test suite with coverage
+        # The whole suite is offline/deterministic — no network, no broker, no live
+        # Sharadar calls (SharadarUnavailable/cache-miss paths are what's tested).
         run: |
-          pytest -m "not slow and not network" \
-            --cov=risk --cov=signals --cov=factors --cov=backtest \
+          pytest \
+            --cov=data --cov=factors --cov=research --cov=strategies \
+            --cov=backtest --cov=decision --cov=execution --cov=storage \
             --cov-report=term-missing
