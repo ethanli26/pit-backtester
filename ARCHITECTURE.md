@@ -360,7 +360,10 @@ Every factor prevents it with backward-only `shift()` and `rolling()` operations
 flagged in its own source with a `LOOK-AHEAD GUARD` comment (Chapter 2).
 
 That's still just a claim a human wrote next to the code. It's *verified*, not just
-asserted, by a property test:
+asserted, two ways.
+
+**Every research run** spot-checks one real factor against the real, live Sharadar data
+(`factors.run_factor_eval.assert_filing_date_safety`):
 
 ```python
 def assert_filing_date_safety(data, factor_name="profitability"):
@@ -370,6 +373,27 @@ def assert_filing_date_safety(data, factor_name="profitability"):
     trunc = factor.compute(truncated).loc[cutoff]
     assert (full - trunc).abs().max() < 1e-9, f"FILING-DATE LEAK in {factor_name}"
 ```
+
+**Every test run** generalizes that exact idea into a property test that covers the *whole*
+factor registry on synthetic data (`tests/test_no_lookahead.py`), driven by `hypothesis`:
+
+```python
+@given(seed=st.integers(...), n_symbols=st.integers(3, 6))
+def test_no_factor_uses_future_data(seed, n_symbols):
+    data = _make_factor_data(seed, n_symbols)     # random synthetic panel
+    truncated = _truncate(data, cutoff)            # every future row deleted
+
+    for name, cls in all_factors().items():        # EVERY registered factor, automatically
+        full_row = cls().compute(data).loc[cutoff]
+        trunc_row = cls().compute(truncated).loc[cutoff]
+        assert full_row.equals_within_tolerance(trunc_row)   # simplified; see the real assertion
+```
+
+Because it iterates the registry rather than naming factors, a new factor is checked the
+moment it's registered — zero new test code. It genuinely catches leaks: injecting a
+one-line bug into `momentum_12_1` (`shift(-1)` instead of `shift(21)` — reading tomorrow's
+close) fails the test immediately, naming the exact factor and the exact date, and
+hypothesis shrinks the failure to the smallest reproducing case (`seed=0, n_symbols=3`).
 
 **The logic is beautiful in its simplicity:** if a factor's value on June 1st genuinely
 uses only data through June 1st, then deleting everything after June 1st can't change it.
