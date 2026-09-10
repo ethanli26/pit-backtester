@@ -1,7 +1,6 @@
 # pit-backtester
 
-<!-- Replace OWNER/REPO with your GitHub path once pushed. -->
-![CI](https://github.com/OWNER/pit-backtester/actions/workflows/ci.yml/badge.svg)
+![CI](https://github.com/ethanli26/pit-backtester/actions/workflows/ci.yml/badge.svg)
 ![coverage](https://img.shields.io/badge/coverage-pytest--cov-blue)
 
 A point-in-time-correct backtesting and validation platform. It treats "is this signal
