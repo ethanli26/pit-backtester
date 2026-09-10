@@ -1,14 +1,13 @@
 """Vol-managed momentum — the validated, deployable crash-controlled momentum strategy.
 
 This promotes the one variant that, on survivorship-free data OOS after costs, beat both
-momentum-alone AND passive AND tamed the crash (see ml/momentum_variants.py): 12-1
+momentum-alone AND passive AND tamed the crash (see research/momentum_variants.py): 12-1
 momentum, ranked cross-sectionally, formed monthly as decile portfolios, then scaled to a
 target volatility (Barroso & Santa-Clara 2015) so exposure shrinks before momentum's
 crash-prone high-vol regimes.
 
-It is a CROSS-SECTIONAL, MONTHLY, LEVERAGE-OVERLAY portfolio — a different paradigm from
-the per-name daily breakout engine — so it is registered in the portfolio registry, not
-the engine registry. Two variants:
+It is a CROSS-SECTIONAL, MONTHLY, LEVERAGE-OVERLAY portfolio, so it registers in the
+portfolio registry (``strategies/registry.py``). Two variants:
 
   * long/short  — long top decile, short bottom decile (market-neutral-ish), vol-scaled.
   * long-only   — long top decile only, vol-scaled with the remainder in cash (for paper/
@@ -155,11 +154,9 @@ class VolManagedMomentum:
 
         The validated strategy is an equal-weight decile, so we deploy it equal-weight:
         invest ``gross_weight`` of equity across the decile (the Barroso vol scaling, capped
-        at ``leverage_cap``), each name capped at the EXISTING per-name portfolio cap
-        ``config.MAX_POSITION_PCT``. (We intentionally do NOT use the 1%-risk
-        ``size_position`` here — that sizer is for the few-name breakout book and would
-        grossly over-allocate a ~90-name decile, i.e. a different strategy than the one
-        that survived walk-forward.)
+        at ``leverage_cap``), each name capped at ``config.MAX_POSITION_PCT``. A per-trade
+        risk-based sizer would grossly over- or under-allocate a ~90-name decile — that is
+        a different strategy than the equal-weight one that survived walk-forward.
         """
         names = self.top_decile(scores_row, eligible_row)
         if not names:
