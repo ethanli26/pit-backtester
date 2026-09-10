@@ -1,8 +1,8 @@
 """Size-tier universes (large / mid / small) for the cap-spectrum comparison.
 
 Each universe is a fixed, representative, sector-keyed constituent list. The large
-universe is the existing screener set; mid and small are hardcoded S&P 400 / Russell
-2000-style names.
+universe is a hardcoded set of liquid large-caps per sector; mid and small are
+hardcoded S&P 400 / Russell 2000-style names.
 
 SURVIVORSHIP CAVEAT (read this): these are TODAY'S surviving tickers. Without
 point-in-time constituent data, delisted/merged/failed names are absent — a bias
@@ -22,9 +22,6 @@ from pathlib import Path
 import pandas as pd
 import yfinance as yf
 
-from screener.sectors import SECTOR_ETFS
-from screener.stocks import SECTOR_CONSTITUENTS
-
 log = logging.getLogger(__name__)
 
 BENCHMARK = "SPY"
@@ -34,8 +31,23 @@ OHLCV_COLUMNS = ["Open", "High", "Low", "Close", "Volume"]
 CACHE_DIR = Path(__file__).resolve().parent / "cache" / "ohlcv"
 THROTTLE_SECONDS = 0.15
 
-# Large-cap baseline: the existing screener constituents.
-LARGE = SECTOR_CONSTITUENTS
+# The 11 SPDR sector ETFs that make up the investable sector universe.
+SECTOR_ETFS = ["XLK", "XLF", "XLE", "XLV", "XLY", "XLP", "XLI", "XLB", "XLU", "XLRE", "XLC"]
+
+# Large-cap baseline: a handful of large, liquid constituents per sector.
+LARGE: dict[str, list[str]] = {
+    "XLK":  ["AAPL", "MSFT", "NVDA", "AVGO", "ORCL", "CRM", "AMD", "ADBE"],
+    "XLF":  ["BRK-B", "JPM", "V", "MA", "BAC", "WFC", "GS", "SPGI"],
+    "XLE":  ["XOM", "CVX", "COP", "EOG", "SLB", "MPC", "PSX"],
+    "XLV":  ["LLY", "UNH", "JNJ", "ABBV", "MRK", "TMO", "ABT", "PFE"],
+    "XLY":  ["AMZN", "TSLA", "HD", "MCD", "NKE", "LOW", "BKNG", "SBUX"],
+    "XLP":  ["PG", "COST", "KO", "PEP", "WMT", "PM", "MO"],
+    "XLI":  ["GE", "CAT", "RTX", "UNP", "HON", "BA", "UPS", "DE"],
+    "XLB":  ["LIN", "SHW", "FCX", "ECL", "NEM", "APD", "DOW"],
+    "XLU":  ["NEE", "SO", "DUK", "CEG", "AEP", "D", "EXC"],
+    "XLRE": ["PLD", "AMT", "EQIX", "WELL", "SPG", "O", "PSA", "CCI"],
+    "XLC":  ["META", "GOOGL", "NFLX", "DIS", "TMUS", "VZ", "CMCSA"],
+}
 
 # Mid-cap (S&P 400-style) representative names, sector-keyed. Today's survivors.
 MID: dict[str, list[str]] = {

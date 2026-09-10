@@ -27,7 +27,7 @@ import pandas as pd
 import config
 from factors.evaluate import DECILES, MIN_NAMES_PER_DATE, _rebalance_dates
 from factors.library import Momentum12_1
-from ml.combine_train import RF_ANNUAL, long_short_returns
+from research.combine_train import RF_ANNUAL, long_short_returns
 from strategies.registry import register_portfolio
 
 

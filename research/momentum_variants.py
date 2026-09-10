@@ -37,7 +37,7 @@ from factors.evaluate import _rebalance_dates, evaluate_factor  # noqa: E402
 from factors.fundamentals import BookToPrice, EarningsYield, Profitability  # noqa: E402
 from factors.library import Momentum12_1  # noqa: E402
 from factors.run_factor_eval import build_sharadar_factor_data  # noqa: E402
-from ml.combine_train import (  # noqa: E402  (reuse the validated traded/metrics helpers)
+from research.combine_train import (  # noqa: E402  (reuse the validated traded/metrics helpers)
     COST_BPS_PER_SIDE,
     IC_THRESHOLD,
     OOS_FRACTION,

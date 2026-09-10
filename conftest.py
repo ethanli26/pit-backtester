@@ -1,5 +1,5 @@
 """Pytest bootstrap: make the repo root importable so tests can `import config`,
-`from risk.position import ...`, etc., regardless of where pytest is invoked from.
+`from factors.evaluate import ...`, etc., regardless of where pytest is invoked from.
 """
 
 import sys

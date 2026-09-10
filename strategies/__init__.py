@@ -1,8 +1,7 @@
-"""Strategy library: pluggable, registered strategies held to the honest bar.
+"""Strategy library: pluggable, registered portfolio strategies held to an honest bar.
 
-Importing this package registers the built-in strategies (breakout, pullback,
-earnings_drift) so the registry is populated and the evaluation harness can score
-them automatically.
+Importing this package registers the built-in portfolio strategies (vol-managed
+momentum) so the portfolio registry is populated automatically.
 """
 
-from strategies import breakout, earnings_drift, pullback  # noqa: F401  (register on import)
+from strategies import vol_managed_momentum  # noqa: F401  (registers on import)

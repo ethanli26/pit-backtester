@@ -40,7 +40,7 @@ from factors.base import all_factors, get  # noqa: E402
 from factors.evaluate import _rebalance_dates, evaluate_factor  # noqa: E402
 from factors.library import Momentum12_1  # noqa: E402
 from factors.run_factor_eval import build_sharadar_factor_data  # noqa: E402
-from ml.combine_train import (  # noqa: E402
+from research.combine_train import (  # noqa: E402
     IC_THRESHOLD,
     SPY_CACHE,
     TSTAT_THRESHOLD,

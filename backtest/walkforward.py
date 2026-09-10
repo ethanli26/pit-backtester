@@ -22,7 +22,7 @@ import pandas as pd
 
 import config
 from backtest.universe import equal_weight_index
-from ml.combine_train import SPY_CACHE, _monthly_metrics, spy_monthly_returns, vol_matched_blend
+from research.combine_train import SPY_CACHE, _monthly_metrics, spy_monthly_returns, vol_matched_blend
 from factors.evaluate import _rebalance_dates
 from strategies.vol_managed_momentum import VolManagedMomentum
 

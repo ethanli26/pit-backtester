@@ -3,7 +3,7 @@
 import numpy as np
 import pandas as pd
 
-from ml.momentum_variants import subperiod_return, vol_managed, worst_rolling_12m
+from research.momentum_variants import subperiod_return, vol_managed, worst_rolling_12m
 
 
 def _monthly(values, start="2005-01-31"):
