@@ -144,6 +144,21 @@ def cmd_strategy(args) -> int:
     print("\n=== Walk-forward (non-overlapping OOS windows, after costs) ===")
     walkforward.print_walkforward(wf)
     walkforward.capacity_report(strategy, data, eligible)
+
+    # --- CPCV / Deflated Sharpe / PBO: is this real, or did the search just get lucky? ---
+    from research.cpcv import deflated_sharpe_ratio, print_cpcv_report, probability_of_backtest_overfitting, run_cpcv
+    from research.momentum_variants import build_variant_returns
+
+    cpcv_results = run_cpcv(strategy, data, eligible, rebal)
+    full_returns = strategy.portfolio_returns(data, eligible)
+    dsr_result = deflated_sharpe_ratio(full_returns, [r["sharpe"] for r in cpcv_results])
+    pbo_result = None
+    try:
+        variant_returns, _, _, _ = build_variant_returns(data, eligible)
+        pbo_result = probability_of_backtest_overfitting(variant_returns)
+    except ValueError as error:
+        log.warning("Skipping PBO: %s", error)
+    print_cpcv_report(name, cpcv_results, dsr_result, pbo_result)
     return 0
 
 

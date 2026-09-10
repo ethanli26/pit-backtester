@@ -1,19 +1,18 @@
-# Core dependencies for the swing trading agent.
+# Core dependencies for pit-backtester.
 # After your first install, you can pin exact versions with: pip freeze > requirements.txt
 
-# Broker / execution
-ib_async
-
-# Data and news
-yfinance
-finnhub-python
+# Data
+yfinance                # free-data comparison universes + the SPY cache
+nasdaqdatalink          # Sharadar point-in-time prices + fundamentals
+pyarrow                 # parquet caches (backtest/cache, data/cache/sharadar)
 
 # Analysis
 pandas
 numpy
+scipy                   # research/cpcv.py: skew, kurtosis, the normal CDF
 
-# Backtesting
-vectorbt
+# Broker / execution
+ib_async
 
 # Config
 python-dotenv

@@ -59,7 +59,10 @@ flowchart TD
         COMBINE --> WF[Walk-forward:<br/>non-overlapping OOS windows]
         WF --> BAR{Beats SPY and a<br/>vol-matched blend,<br/>consistently, after costs?}
         BAR -->|no| TRASH[Don't deploy it]
-        BAR -->|yes| PROMOTE[Promote to paper]
+        BAR -->|yes| CPCV[CPCV: many combinatorial<br/>OOS draws, purged + embargoed]
+        CPCV --> DSR{Deflated Sharpe + PBO:<br/>real, after accounting for<br/>every trial and variant tried?}
+        DSR -->|no| TRASH
+        DSR -->|yes| PROMOTE[Promote to paper]
     end
 
     subgraph LIVE["LIVE — runs monthly, touches a paper account"]
@@ -78,9 +81,13 @@ safety checks that get re-verified before every single order.
 **The honest headline:** the one strategy that survived this gauntlet (12-1 momentum,
 volatility-managed) is, in the code's own words, "a modest, robust-but-not-Sharpe-dominant
 strategy" — not a discovery of hidden alpha. Most of what went into the factor library
-didn't survive contact with point-in-time data (see Chapter 4). That's the system working
-correctly: the point of the machinery is to find out what doesn't work for free, and to be
-honest about the modesty of what does.
+didn't survive contact with point-in-time data (see Chapter 4), and even the survivor
+doesn't get a free pass at the end: a real CPCV/Deflated-Sharpe run put its full-history
+Sharpe at only 39% likely to beat the trial-adjusted benchmark (Chapter 10) — genuinely
+inconclusive, stated plainly, not rounded up. What IS well-supported is that picking this
+variant over the four alternatives wasn't overfitting (PBO 8.6%, also Chapter 10). That's
+the system working correctly: the point of the machinery is to find out what doesn't work
+for free, and to be honest about the modesty — and the genuine uncertainty — of what does.
 
 ---
 ## Chapter 1: Why this exists
@@ -920,6 +927,140 @@ eventually justifies moving from `approve` to `semi_auto` — or justifies shutt
 
 ---
 
+## Chapter 10: Was that real, or did the search just get lucky?
+
+**File:** `research/cpcv.py`
+
+Walk-forward (Chapter 8) is a real improvement over one in-sample backtest — but it's
+still built from a small, fixed number of sequential windows. If you tried several
+variants along the way (Chapter 7 tried five), and each walk-forward run is itself one
+draw, there's a question walk-forward alone can't answer: **given how many
+effectively-independent looks this whole process took, what's the chance the number you're
+looking at is luck?**
+
+Two techniques, both from the same "partition history into groups, try every
+combination" machinery, answer two different halves of that question.
+
+### Combinatorial Purged Cross-Validation (CPCV) — many out-of-sample draws, not one
+
+Instead of one sequential walk-forward, split the rebalance timeline into `N` groups and
+evaluate **every way of choosing `k` of them as the test set** — `C(N, k)` splits, not
+`N`. With `N=8, k=2` that's 28 out-of-sample draws instead of the walk-forward chapter's 9.
+
+```
+Groups:  [1][2][3][4][5][6][7][8]
+
+Split 1: test = {2,5}   train = everything else, minus the purge/embargo zone around 2 and 5
+Split 2: test = {2,6}   train = ...
+Split 3: test = {3,7}   train = ...
+   ...                  (28 splits total = C(8,2))
+```
+
+**PURGE and EMBARGO, stated precisely:** a monthly rebalance's return LABEL spans from
+that date to the next one. If a training date's label would reach into a test group, that
+training date is dropped (*purge* — one position, immediately before the test block). And
+because monthly returns aren't perfectly independent, the few dates right after a test
+block are *also* dropped from train (*embargo*) so nothing about the test period's
+aftermath leaks backward into training. Both are enforced in `cpcv_splits()`, and
+`tests/test_cpcv.py` checks it directly: no purged or embargoed position ever appears in a
+split's train set.
+
+The result is a **distribution** of out-of-sample Sharpes, not one number — the same shift
+in thinking the worst-window line made valuable in Chapter 8, but from many more draws.
+
+### The Deflated Sharpe Ratio — correcting for how hard you searched, and for non-normal returns
+
+**Source:** Bailey & López de Prado (2014), "The Deflated Sharpe Ratio."
+
+A Sharpe ratio assumes returns are normally distributed and that you tried this exactly
+once. Neither is true here — monthly momentum returns are skewed (crash risk, Chapter 4),
+and the walk-forward/CPCV process tried many out-of-sample windows before this document
+called anything "the survivor."
+
+DSR corrects for both. It uses the CPCV path Sharpes to estimate how much a set of
+similarly-searched trials could look good **by chance alone** (their *variance*, not their
+level, is what matters — five trials that all cluster together imply a small search space;
+five that scatter widely imply a much bigger one):
+
+```python
+# The benchmark a real result must clear, given how much the "attempts" varied:
+sr0 = sqrt(Var[trial_Sharpes]) * ((1 - euler_gamma) * z1 + euler_gamma * z2)
+
+# Then: does the observed Sharpe clear THAT bar, adjusted for skew/kurtosis?
+z = (sr_hat - sr0) * sqrt(n_obs - 1) / sqrt(1 - skew*sr_hat + (kurtosis-1)/4*sr_hat**2)
+dsr = Phi(z)   # probability the TRUE Sharpe exceeds the trial-adjusted benchmark
+```
+
+**Why the trials matter more than the headline Sharpe.** A 0.82 Sharpe from one lucky
+lonely backtest and a 0.82 Sharpe that consistently clears a benchmark built from 28
+genuinely different out-of-sample draws are not the same claim. DSR is the number that
+tells them apart.
+
+### Probability of Backtest Overfitting (PBO) — did picking "the best" pick noise?
+
+**Source:** Bailey, Borwein, López de Prado & Zhu (2014), "The Probability of Backtest
+Overfitting" (the CSCV procedure).
+
+PBO needs more than one candidate to be meaningful — which is exactly what Chapter 7's
+five pre-specified momentum-crash-fix variants already are, a genuine "trials matrix" this
+codebase produced honestly, not one fabricated to make PBO computable
+(`research.momentum_variants.build_variant_returns`).
+
+The procedure: split history into groups, and for every way of using **half as train and
+the complementary half as test**, find whichever variant looks best IN-SAMPLE and check
+where its OUT-OF-SAMPLE Sharpe **ranks** among all five:
+
+```
+   In-sample winner this split: D_mom_plus_quality
+   Its out-of-sample rank among all 5 variants: #4 of 5  (below the median)
+   -> this split counts toward PBO: picking "the best" here would have picked noise.
+```
+
+`PBO` is the fraction of splits where that happens. **Near 50% means the in-sample winner
+is indistinguishable from a coin flip out of sample — classic overfitting.** Well below it
+means the winner tends to generalize. `tests/test_cpcv.py` verifies both directions on
+synthetic data: a genuinely-better variant produces low PBO, and five indistinguishable
+noise variants average to ~50% PBO across seeds (a single seed is a noisy estimate of
+that — a known property of CSCV with finite data, not a bug, which is why the test
+averages several seeds rather than trusting one).
+
+**One subtlety worth naming, because it was a real bug caught by testing this against a
+known-noise scenario before trusting it:** the relative rank must be computed as
+`rank / (N+1)`, not `rank / N` — dividing by `N` shifts the "exactly average" case away
+from 0.5, which quietly biases PBO downward for every run. Property-testing against
+synthetic pure-noise data (Chapter 1's philosophy, applied here too) is what caught it.
+
+### What this run actually said
+
+```
+python main.py strategy vol_managed_momentum
+```
+```
+CPCV — combinatorial purged cross-validation (vol_managed_momentum)
+  28 splits | Sharpe distribution: min -0.23, median +0.44, max +0.99; 25/28 positive.
+
+--- Deflated Sharpe Ratio (Bailey & Lopez de Prado 2014) ---
+  Observed Sharpe (annualized)      : +0.61
+  Benchmark SR0 from 28 CPCV trials (annualized): +0.67
+  Return skew / kurtosis             : -0.09 / 5.80 (normal = 0 / 3)
+  Deflated Sharpe Ratio (probability true Sharpe > SR0): 39.4%
+
+--- Probability of Backtest Overfitting (Bailey et al. 2014, CSCV) ---
+  5 candidate variants, 70 train/test splits
+  PBO = 8.6% (fraction of splits where the in-sample-best variant finished at/below the OOS median)
+  => LOW — the winning variant tends to generalize.
+```
+
+**Read plainly:** the full-history Sharpe is only 39.4% likely to beat what 28
+genuinely different out-of-sample draws would produce by chance — that is NOT a passing
+grade, and this document isn't rounding it up to one. What the run *does* support is that
+the choice of *this* variant over the other four wasn't the overfitting: an 8.6% PBO says
+the selection process generalizes even though the resulting Sharpe itself remains
+unproven. Both things are true at once, and reporting only one of them would be the kind
+of cherry-picking this whole chapter exists to catch.
+
+---
+
 # Reference
 
 ---
@@ -1171,9 +1312,10 @@ pit-backtester/
 │   ├── run_factor_eval.py           the scorecard, multiple-testing note, shortlist
 │   └── run_altdata_eval.py          the insider/institutional gauntlet
 │
-├── research/                    📐 factor-combination and crash-fix validation
+├── research/                    📐 factor-combination, crash-fix, and overfitting checks
 │   ├── combine_train.py             does the composite beat each factor alone, OOS?
-│   └── momentum_variants.py         5 pre-specified momentum-crash fixes, head to head
+│   ├── momentum_variants.py         5 pre-specified momentum-crash fixes, head to head
+│   └── cpcv.py                      ⭐ CPCV, Deflated Sharpe Ratio, and PBO
 │
 ├── strategies/                  📚 the strategy that survived
 │   ├── registry.py                  @register_portfolio — the harness auto-scores it
@@ -1220,8 +1362,8 @@ small-cap tier.
 
 **4. The multiple-testing problem doesn't go away just because it's named.** ~24 factors
 get tested at |t|>2; under the null, roughly one passes by chance alone even if nothing
-works. The sign filter and OOS re-test catch most of that, but "we named the risk" is not
-the same as "the risk is zero."
+works. The sign filter, OOS re-test, and Chapter 10's Deflated Sharpe / PBO checks catch
+most of that, but "we quantified the risk" is not the same as "the risk is zero."
 
 **5. The paper track record is short.** A handful of monthly cycles. It's evidence
 accumulating, not evidence accumulated.
@@ -1243,6 +1385,10 @@ promotion.
    comments explaining exactly what it refuses to do and why.
 5. **`backtest/walkforward.py`** — the real robustness test, and the honest capacity report
    at the end of it.
+6. **`research/cpcv.py`** — the next layer of skepticism on top of walk-forward: many
+   combinatorial OOS draws, the Deflated Sharpe Ratio, and PBO.
+7. **`tests/test_no_lookahead.py`** — a mechanical proof, not a claim, that no factor uses
+   future data. Read it alongside whichever factor you're about to trust.
 
 ---
 

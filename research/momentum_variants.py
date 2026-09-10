@@ -109,11 +109,18 @@ def _ic_row(name, score):
                                     and abs(score["t_stat"]) > TSTAT_THRESHOLD) else "no"}
 
 
-def main() -> int:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S")
-    logging.getLogger("data.sharadar_provider").setLevel(logging.WARNING)
+def build_variant_returns(data, eligible) -> tuple[dict[str, pd.Series], pd.Timestamp, dict, dict]:
+    """The five pre-specified momentum-crash-fix variants' full-history monthly net
+    returns (A-E, see the module docstring). Reused by ``main()`` below and by
+    ``research.cpcv``'s PBO check, which treats these five as the "trials" a real
+    PBO analysis needs (rather than one).
 
-    data, eligible = build_sharadar_factor_data()       # offline, PIT, survivorship-free
+    Returns ``(returns_by_variant, oos_split, value_factor_diagnostics, rankable_factors)``
+    where ``value_factor_diagnostics`` is
+    ``{"name": ..., "book_to_price_ic": ..., "earnings_yield_ic": ...}`` and
+    ``rankable_factors`` is ``{name: Factor}`` for the three cross-sectionally-rankable
+    variants (A, C, D — B and E are portfolio overlays, not rankable factors).
+    """
     close = data.close
     rebal = _rebalance_dates(close.index, "M")
     split = rebal[int(len(rebal) * (1.0 - OOS_FRACTION))]
@@ -142,6 +149,20 @@ def main() -> int:
     # B and E are portfolio overlays (vol management) of A and D's traded series.
     ls_full["B_vol_managed_mom"] = vol_managed(ls_full["A_momentum"], split)
     ls_full["E_risk_managed_quality_mom"] = vol_managed(ls_full["D_mom_plus_quality"], split)
+    diagnostics = {"name": value_name, "book_to_price_ic": btp["mean_ic"], "earnings_yield_ic": ey["mean_ic"]}
+    return ls_full, split, diagnostics, rankable
+
+
+def main() -> int:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S")
+    logging.getLogger("data.sharadar_provider").setLevel(logging.WARNING)
+
+    data, eligible = build_sharadar_factor_data()       # offline, PIT, survivorship-free
+    close = data.close
+    rebal = _rebalance_dates(close.index, "M")
+
+    ls_full, split, value_diag, rankable = build_variant_returns(data, eligible)
+    value_name, btp_ic, ey_ic = value_diag["name"], value_diag["book_to_price_ic"], value_diag["earnings_yield_ic"]
     order = ["A_momentum", "B_vol_managed_mom", "C_mom_plus_value",
              "D_mom_plus_quality", "E_risk_managed_quality_mom"]
 
@@ -156,7 +177,7 @@ def main() -> int:
     print(f"Universe: liquid survivorship-free US common stocks | {rebal[0].date()} -> {rebal[-1].date()} "
           f"| OOS from {split.date()} (last {int(OOS_FRACTION*100)}%)")
     print(f"Value factor chosen for C (stronger full-history IC): {value_name} "
-          f"(book_to_price IC {_f(btp['mean_ic'])}, earnings_yield IC {_f(ey['mean_ic'])})")
+          f"(book_to_price IC {_f(btp_ic)}, earnings_yield IC {_f(ey_ic)})")
     print(f"Costs: {COST_BPS_PER_SIDE:.0f} bps/side on actual decile turnover. "
           f"Vol target: trailing {VOL_TARGET_WINDOW}mo, leverage cap {VOL_LEVERAGE_CAP}x.\n")
 

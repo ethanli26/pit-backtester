@@ -5,11 +5,12 @@
 
 A point-in-time-correct backtesting and validation platform. It treats "is this signal
 real, or did I just get lucky?" as an engineering problem: survivorship-bias-free data,
-factor predictive power measured before any strategy is built, combinations that are
-provably not overfit, walk-forward out-of-sample validation, and a safety-gated paper
-execution path to Interactive Brokers. The one strategy it ships (12-1 momentum, volatility
-managed) is deliberately simple — the depth is in the system that proves it's trustworthy,
-not in a proprietary formula.
+look-ahead safety mechanically proven per factor (not just commented) via property-based
+testing, walk-forward out-of-sample validation, combinatorial purged cross-validation with
+a Deflated Sharpe Ratio and Probability of Backtest Overfitting check, and a safety-gated
+paper execution path to Interactive Brokers. The one strategy it ships (12-1 momentum,
+volatility managed) is deliberately simple — the depth is in the system that proves it's
+trustworthy, not in a proprietary formula.
 
 See `ARCHITECTURE.md` for the full guided tour — how each piece works, why it's built that
 way, and an honest read of what the results actually say.
@@ -61,7 +62,7 @@ way, and an honest read of what the results actually say.
 ```
 python main.py factors                          # factor IC scorecard (free data + point-in-time Sharadar)
 python main.py altdata                           # insider/institutional factor gauntlet vs momentum
-python main.py strategy vol_managed_momentum     # backtest + benchmark + walk-forward validation
+python main.py strategy vol_managed_momentum     # backtest + walk-forward + CPCV/Deflated-Sharpe/PBO
 python main.py paper vol_managed_momentum        # one monthly paper rebalance (needs TWS/IB Gateway)
 ```
 
@@ -81,9 +82,13 @@ pytest
 What's covered:
 
 - **factors/** — the IC/decile harness, the price and point-in-time fundamental factor
-  libraries, and the look-ahead-safety property (a factor's value at *t* is unchanged when
-  future bars are dropped).
+  libraries, and a registry-driven, property-based proof (`tests/test_no_lookahead.py`,
+  via `hypothesis`) that every currently-registered factor is look-ahead safe — generated
+  synthetic data is truncated at a cutoff and every factor's value there must be
+  unchanged, for any seed and symbol count `hypothesis` throws at it.
 - **strategies/** — the vol-managed-momentum overlay and its crash-fix variants.
+- **research/cpcv.py** — the CPCV combinatorics (split count, purge/embargo correctness)
+  and the Deflated Sharpe Ratio / PBO math against synthetic series with a known answer.
 - **decision/** — the paper-rebalance diff-to-orders logic.
 - **safety guards** — the DU-account (paper-only) guard and `DRY_RUN` both block order
   placement and cannot be bypassed (broker mocked; no live connection).
