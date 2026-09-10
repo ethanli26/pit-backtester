@@ -3,7 +3,7 @@
 
 # Data
 yfinance                # free-data comparison universes + the SPY cache
-nasdaqdatalink          # Sharadar point-in-time prices + fundamentals
+nasdaq-data-link        # Sharadar point-in-time prices + fundamentals (imports as `nasdaqdatalink`)
 pyarrow                 # parquet caches (backtest/cache, data/cache/sharadar)
 
 # Analysis
